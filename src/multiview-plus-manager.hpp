@@ -53,8 +53,10 @@ private:
     // ── Layout control ───────────────────────────────────────────────────────
     void setLayout(MultiviewLayout mode);
 
-    // ── Scene ordering ───────────────────────────────────────────────────────
+    // ── Scene ordering & visibility ──────────────────────────────────────────
     void moveScene(const std::string &name, bool forward);
+    void hideScene(const std::string &name);
+    void showAllScenes();
 
     // ── Multiview window tracking ────────────────────────────────────────────
     QWidget *findMultiviewWindow();

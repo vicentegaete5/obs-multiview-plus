@@ -95,7 +95,7 @@ public:
     // Hit-test: which scene name is under pixel position p (in our coords)?
     std::string sceneAtPoint(const QPoint &p) const
     {
-        const auto &entries = m_model->entries();
+        const auto entries = m_model->visibleEntries();
         for (int i = 0; i < (int)m_cellRects.size() && i < (int)entries.size(); i++) {
             if (m_cellRects[i].contains(p))
                 return entries[i].name;
@@ -122,7 +122,8 @@ protected:
         // Dark background
         p.fillRect(rect(), QColor(20, 20, 20));
 
-        const auto &entries = m_model->entries();
+        // Only render visible entries
+        const auto entries = m_model->visibleEntries();
         if (entries.empty()) return;
 
         m_cellRects.clear();
@@ -205,9 +206,10 @@ private:
     void drawSceneCell(QPainter &p, const QRect &cell,
                        const SceneEntry &entry, int /*index*/)
     {
-        // Border
-        bool isProgram = (m_programScene == entry.name);
-        bool isPreview = (m_previewScene == entry.name);
+        bool isReservedPreview = (entry.name == SLOT_PREVIEW);
+        bool isReservedProgram = (entry.name == SLOT_PROGRAM);
+        bool isProgram = isReservedProgram || (m_programScene == entry.name);
+        bool isPreview = isReservedPreview || (m_previewScene == entry.name);
 
         QColor border(60, 60, 60);
         if (isProgram)      border = QColor(220, 50, 50);
@@ -217,13 +219,25 @@ private:
         p.setBrush(QColor(30, 30, 30));
         p.drawRect(cell.adjusted(1, 1, -1, -1));
 
-        // Scene video frame (best-effort: grab OBS source frame)
-        QRect innerCell = cell.adjusted(2, 2, -2, -18); // leave room for label
-        drawSourcePreview(p, innerCell, entry.name);
+        QRect innerCell = cell.adjusted(2, 2, -2, -18);
+
+        if (isReservedPreview) {
+            // Draw the live preview source
+            drawSourcePreview(p, innerCell, m_previewScene);
+        } else if (isReservedProgram) {
+            // Draw the live program source
+            drawSourcePreview(p, innerCell, m_programScene);
+        } else {
+            drawSourcePreview(p, innerCell, entry.name);
+        }
 
         // Label bar
-        QRect labelRect(cell.left(), cell.bottom() - 18,
-                        cell.width(), 18);
+        QString displayName;
+        if      (isReservedPreview) displayName = "Preview";
+        else if (isReservedProgram) displayName = "Program";
+        else displayName = QString::fromStdString(entry.name);
+
+        QRect labelRect(cell.left(), cell.bottom() - 18, cell.width(), 18);
         p.fillRect(labelRect, QColor(0, 0, 0, 180));
 
         p.setPen(Qt::white);
@@ -233,7 +247,7 @@ private:
         p.setFont(f);
         p.drawText(labelRect.adjusted(4, 0, -4, 0),
                    Qt::AlignVCenter | Qt::AlignLeft,
-                   QString::fromStdString(entry.name));
+                   displayName);
 
         // PGM/PRV badge
         if (isProgram || isPreview) {

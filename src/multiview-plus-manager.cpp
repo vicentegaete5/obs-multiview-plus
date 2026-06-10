@@ -162,6 +162,21 @@ void MultiviewPlusManager::moveScene(const std::string &name, bool forward)
     saveSettings();
 }
 
+void MultiviewPlusManager::hideScene(const std::string &name)
+{
+    if (name.empty()) return;
+    m_model.hide(name);
+    if (m_overlay) m_overlay->refresh();
+    saveSettings();
+}
+
+void MultiviewPlusManager::showAllScenes()
+{
+    m_model.showAll();
+    if (m_overlay) m_overlay->refresh();
+    saveSettings();
+}
+
 // ── Context menu ─────────────────────────────────────────────────────────────
 
 void MultiviewPlusManager::onContextMenuRequested(const QPoint &globalPos,
@@ -195,8 +210,6 @@ void MultiviewPlusManager::onContextMenuRequested(const QPoint &globalPos,
 
     QAction *fwdAction = moveMenu->addAction(tr("Forward"));
     QAction *bwdAction = moveMenu->addAction(tr("Backward"));
-    fwdAction->setEnabled(hasScene);
-    bwdAction->setEnabled(hasScene);
 
     if (hasScene) {
         int idx   = m_model.indexOf(sceneName);
@@ -208,7 +221,38 @@ void MultiviewPlusManager::onContextMenuRequested(const QPoint &globalPos,
                 [this, sceneName]() { moveScene(sceneName, true); });
         connect(bwdAction, &QAction::triggered, this,
                 [this, sceneName]() { moveScene(sceneName, false); });
+    } else {
+        fwdAction->setEnabled(false);
+        bwdAction->setEnabled(false);
     }
+
+    // ── Hide / Show All ──────────────────────────────────────────────────────
+    menu.addSeparator();
+
+    // "Hide Scene" — shows the display name of the slot under the cursor.
+    // For the reserved slots we show a human-readable label.
+    QString hideLabel;
+    if      (sceneName == SLOT_PREVIEW) hideLabel = tr("Hide Preview");
+    else if (sceneName == SLOT_PROGRAM) hideLabel = tr("Hide Program");
+    else if (!sceneName.empty())
+        hideLabel = tr("Hide \"%1\"").arg(QString::fromStdString(sceneName));
+    else
+        hideLabel = tr("Hide Scene");
+
+    QAction *hideAction = menu.addAction(hideLabel);
+    // Disable if no scene under cursor, or if it is already hidden
+    bool canHide = hasScene && m_model.isVisible(sceneName);
+    hideAction->setEnabled(canHide);
+    if (canHide) {
+        connect(hideAction, &QAction::triggered, this,
+                [this, sceneName]() { hideScene(sceneName); });
+    }
+
+    // "Show All" — only enabled when at least one scene is currently hidden
+    QAction *showAllAction = menu.addAction(tr("Show All"));
+    showAllAction->setEnabled(m_model.anyHidden());
+    connect(showAllAction, &QAction::triggered, this,
+            [this]() { showAllScenes(); });
 
     menu.exec(globalPos);
 }
@@ -374,7 +418,12 @@ void MultiviewPlusManager::loadSettings()
     // Scene order
     const char *orderStr = config_get_string(cfg, CFG_SECTION, CFG_SCENE_ORDER);
     if (orderStr && *orderStr)
-        m_model.deserialize(orderStr);
+        m_model.deserializeOrder(orderStr);
+
+    // Hidden scenes
+    const char *hiddenStr = config_get_string(cfg, CFG_SECTION, CFG_HIDDEN_SCENES);
+    if (hiddenStr && *hiddenStr)
+        m_model.deserializeHidden(hiddenStr);
 
     config_close(cfg);
 
@@ -389,14 +438,15 @@ void MultiviewPlusManager::saveSettings()
     if (cfgPath.empty()) return;
 
     config_t *cfg = nullptr;
-    // Create the file if it doesn't exist
     if (config_open(&cfg, cfgPath.c_str(), CONFIG_OPEN_ALWAYS) != CONFIG_SUCCESS)
         return;
 
     config_set_int(cfg, CFG_SECTION, CFG_LAYOUT_MODE,
                    static_cast<int>(m_layout));
     config_set_string(cfg, CFG_SECTION, CFG_SCENE_ORDER,
-                      m_model.serialize().c_str());
+                      m_model.serializeOrder().c_str());
+    config_set_string(cfg, CFG_SECTION, CFG_HIDDEN_SCENES,
+                      m_model.serializeHidden().c_str());
 
     config_save_safe(cfg, "tmp", nullptr);
     config_close(cfg);

@@ -32,9 +32,10 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-multiview-plus", "en-US")
 #define PLUGIN_VERSION "1.0.0"
 
 // Config section / key names
-#define CFG_SECTION     "MultiviewPlus"
-#define CFG_LAYOUT_MODE "LayoutMode"
-#define CFG_SCENE_ORDER "SceneOrder"   // comma-separated scene names
+#define CFG_SECTION        "MultiviewPlus"
+#define CFG_LAYOUT_MODE    "LayoutMode"
+#define CFG_SCENE_ORDER    "SceneOrder"     // comma-separated scene names
+#define CFG_HIDDEN_SCENES  "HiddenScenes"   // comma-separated hidden scene names
 
 // ── Layout mode ──────────────────────────────────────────────────────────────
 
