@@ -1,0 +1,287 @@
+name: Build obs-multiview-plus
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Triggers
+#  • Every push to main / master
+#  • Every pull request targeting main / master
+#  • Every version tag  (v1.0.0, v2.3.1, …)
+#  • Manual run from the Actions tab
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main, master]
+    tags:     ["v*.*.*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Global settings
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  OBS_VERSION:     "32.0.0"          # Minimum supported OBS release
+  PLUGIN_NAME:     "obs-multiview-plus"
+  BUILD_TYPE:      "RelWithDebInfo"  # keeps debug symbols for crash reports
+
+jobs:
+# ─────────────────────────────────────────────────────────────────────────────
+#  BUILD  (Windows x64 only — matching plugin requirements)
+# ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (Windows x64)
+    runs-on: windows-2022          # MSVC 2022 toolchain
+
+    steps:
+    # ── 1. Checkout plugin source ──────────────────────────────────────────
+    - name: Checkout plugin
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0             # full history for accurate version tags
+
+    # ── 2. Determine version string ────────────────────────────────────────
+    #  On a tag push  → "1.2.3"
+    #  On a branch    → "1.2.3-dev.abc1234"  (from CMakeLists + git SHA)
+    - name: Compute version
+      id: version
+      shell: bash
+      run: |
+        if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          VERSION="${GITHUB_REF_NAME#v}"
+        else
+          BASE=$(grep -m1 'project(obs-multiview-plus VERSION' CMakeLists.txt \
+                 | grep -oP '\d+\.\d+\.\d+')
+          SHA=$(git rev-parse --short HEAD)
+          VERSION="${BASE}-dev.${SHA}"
+        fi
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "Plugin version: ${VERSION}"
+
+    # ── 3. Cache OBS Studio pre-built dependencies ─────────────────────────
+    #  The OBS project publishes pre-built "deps" archives that contain
+    #  libobs headers + import libs without requiring a full OBS source build.
+    - name: Cache OBS build artifacts
+      id: cache-obs
+      uses: actions/cache@v4
+      with:
+        path: obs-build
+        key: obs-${{ env.OBS_VERSION }}-windows-x64
+
+    - name: Download OBS Studio build artifacts
+      if: steps.cache-obs.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $version = "${{ env.OBS_VERSION }}"
+        $url = "https://github.com/obsproject/obs-studio/releases/download/${version}/obs-studio-${version}-windows-x64.zip"
+        Write-Host "Downloading OBS $version from $url"
+        Invoke-WebRequest -Uri $url -OutFile obs-release.zip
+        Expand-Archive -Path obs-release.zip -DestinationPath obs-build
+        Write-Host "OBS build artifacts extracted."
+
+    # ── 4. Cache Qt6 ───────────────────────────────────────────────────────
+    - name: Cache Qt6
+      id: cache-qt
+      uses: actions/cache@v4
+      with:
+        path: qt6
+        key: qt-6.6.2-windows-x64-msvc
+
+    - name: Install Qt6
+      if: steps.cache-qt.outputs.cache-hit != 'true'
+      uses: jurplel/install-qt-action@v3
+      with:
+        version:   "6.6.2"
+        host:      "windows"
+        target:    "desktop"
+        arch:      "win64_msvc2019_64"
+        dir:       "${{ github.workspace }}/qt6"
+        cache:     true
+        modules:   ""              # Core + Widgets are in the base package
+
+    - name: Set Qt6 env (cache hit path)
+      if: steps.cache-qt.outputs.cache-hit == 'true'
+      shell: pwsh
+      run: |
+        $qtDir = Get-ChildItem "${{ github.workspace }}/qt6" -Recurse `
+                   -Filter "Qt6Config.cmake" | Select-Object -First 1
+        echo "Qt6_DIR=$($qtDir.DirectoryName)" >> $env:GITHUB_ENV
+
+    # ── 5. Configure with CMake ────────────────────────────────────────────
+    - name: Configure CMake
+      shell: pwsh
+      run: |
+        # Locate OBS cmake config inside the downloaded artifacts
+        $obsDir   = "${{ github.workspace }}\obs-build"
+        $cmakeDir = (Get-ChildItem $obsDir -Recurse -Filter "libobsConfig.cmake" |
+                     Select-Object -First 1).DirectoryName
+        if (-not $cmakeDir) {
+          # Fallback: look for cmake/ directory directly
+          $cmakeDir = "$obsDir\cmake"
+        }
+        Write-Host "OBS CMake dir: $cmakeDir"
+
+        cmake -B build `
+              -G "Visual Studio 17 2022" `
+              -A x64 `
+              -DCMAKE_BUILD_TYPE="${{ env.BUILD_TYPE }}" `
+              -DOBS_BUILD_DIR="$obsDir" `
+              -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}" `
+              -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\install"
+
+    # ── 6. Build ───────────────────────────────────────────────────────────
+    - name: Build plugin
+      shell: pwsh
+      run: |
+        cmake --build build `
+              --config "${{ env.BUILD_TYPE }}" `
+              --parallel $([System.Environment]::ProcessorCount)
+
+    # ── 7. Install into staging directory ─────────────────────────────────
+    #  Produces the exact folder layout required for OBS installation:
+    #    install/
+    #    ├── obs-plugins/64bit/obs-multiview-plus.dll
+    #    └── data/obs-plugins/obs-multiview-plus/locale/*.ini
+    - name: Install to staging directory
+      shell: pwsh
+      run: |
+        cmake --install build --config "${{ env.BUILD_TYPE }}"
+
+    # ── 8. Copy PDB for crash diagnostics (optional but useful) ───────────
+    - name: Copy PDB file
+      shell: pwsh
+      run: |
+        $pdb = Get-ChildItem build -Recurse -Filter "${{ env.PLUGIN_NAME }}.pdb" |
+               Select-Object -First 1
+        if ($pdb) {
+          Copy-Item $pdb.FullName `
+            "${{ github.workspace }}\install\obs-plugins\64bit\${{ env.PLUGIN_NAME }}.pdb"
+          Write-Host "PDB copied: $($pdb.FullName)"
+        } else {
+          Write-Host "No PDB found — skipping"
+        }
+
+    # ── 9. Package as ZIP ──────────────────────────────────────────────────
+    - name: Create release ZIP
+      shell: pwsh
+      run: |
+        $zipName = "${{ env.PLUGIN_NAME }}-${{ steps.version.outputs.version }}-windows-x64.zip"
+        Compress-Archive `
+          -Path "${{ github.workspace }}\install\*" `
+          -DestinationPath "${{ github.workspace }}\$zipName"
+        Write-Host "Created: $zipName"
+        echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+    # ── 10. Upload build artifact (available on every run) ─────────────────
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PLUGIN_NAME }}-${{ steps.version.outputs.version }}-windows-x64
+        path: ${{ github.workspace }}\${{ env.ZIP_NAME }}
+        retention-days: 30
+        if-no-files-found: error
+
+    # ── 11. Create GitHub Release (tag pushes only) ────────────────────────
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        name:     "obs-multiview-plus ${{ steps.version.outputs.version }}"
+        tag_name: ${{ github.ref_name }}
+        draft:    false
+        prerelease: ${{ contains(github.ref_name, '-') }}  # "v1.0.0-beta" → pre-release
+        generate_release_notes: true
+        files: |
+          ${{ github.workspace }}\${{ env.ZIP_NAME }}
+        body: |
+          ## obs-multiview-plus ${{ steps.version.outputs.version }}
+
+          ### Installation
+
+          1. Download `${{ env.ZIP_NAME }}` below.
+          2. Extract the ZIP.
+          3. Copy `obs-plugins/64bit/obs-multiview-plus.dll`
+             → your OBS `obs-plugins/64bit/` folder.
+          4. Copy `data/obs-plugins/obs-multiview-plus/`
+             → your OBS `data/obs-plugins/` folder.
+          5. Restart OBS Studio.
+
+          ### Requirements
+          - OBS Studio ${{ env.OBS_VERSION }}+
+          - Windows x64
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  VERIFY  — quick sanity check on the produced DLL
+# ─────────────────────────────────────────────────────────────────────────────
+  verify:
+    name: Verify artifact
+    runs-on: windows-2022
+    needs: build
+
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        # Pattern matches the artifact uploaded in the build job
+        pattern: ${{ env.PLUGIN_NAME }}-*-windows-x64
+        merge-multiple: true
+        path: artifact
+
+    - name: Inspect ZIP contents
+      shell: pwsh
+      run: |
+        $zip = Get-ChildItem artifact -Filter "*.zip" | Select-Object -First 1
+        Write-Host "Artifact: $($zip.Name)  ($([math]::Round($zip.Length/1KB, 1)) KB)"
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $entries = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries |
+                   Select-Object -ExpandProperty FullName
+        $entries | ForEach-Object { Write-Host "  $_" }
+
+        # Required files must be present
+        $required = @(
+          "obs-plugins/64bit/obs-multiview-plus.dll",
+          "data/obs-plugins/obs-multiview-plus/locale/en-US.ini"
+        )
+        foreach ($r in $required) {
+          if ($entries -notcontains $r) {
+            Write-Error "MISSING required file: $r"
+            exit 1
+          }
+          Write-Host "OK: $r"
+        }
+
+    - name: Check DLL exports
+      shell: pwsh
+      run: |
+        $zip = Get-ChildItem artifact -Filter "*.zip" | Select-Object -First 1
+        Expand-Archive -Path $zip.FullName -DestinationPath extracted
+
+        $dll = "extracted\obs-plugins\64bit\obs-multiview-plus.dll"
+
+        # Use dumpbin to verify the two required OBS exports are present
+        $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+                     -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+                   Select-Object -First 1
+
+        if ($dumpbin) {
+          $exports = & $dumpbin /EXPORTS $dll
+          $required = @("obs_module_load", "obs_module_unload")
+          foreach ($sym in $required) {
+            if ($exports -match $sym) {
+              Write-Host "OK export: $sym"
+            } else {
+              Write-Error "MISSING export: $sym"
+              exit 1
+            }
+          }
+        } else {
+          Write-Host "dumpbin not found — skipping export check"
+          # Fallback: just confirm the DLL exists and has a non-zero size
+          $info = Get-Item $dll
+          if ($info.Length -lt 1024) {
+            Write-Error "DLL is suspiciously small: $($info.Length) bytes"
+            exit 1
+          }
+          Write-Host "DLL size: $($info.Length) bytes — OK"
+        }
