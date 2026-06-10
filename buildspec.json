@@ -1,0 +1,19 @@
+{
+  "name": "obs-multiview-plus",
+  "version": "1.0.0",
+  "author": "obs-multiview-plus contributors",
+  "email": "",
+  "website": "https://github.com/your-org/obs-multiview-plus",
+  "description": "Custom Multiview layout modes and scene ordering for OBS Studio 32+",
+  "dependencies": {
+    "obs-studio": {
+      "version": ">=32.0.0",
+      "notes": "Requires obs-frontend-api and Qt Widgets"
+    }
+  },
+  "platformConfig": {
+    "windows": {
+      "architectures": ["x64"]
+    }
+  }
+}
